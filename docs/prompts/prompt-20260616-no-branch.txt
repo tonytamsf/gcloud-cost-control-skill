@@ -1,0 +1,26 @@
+# Prompts and Responses Log
+
+This file automatically logs all prompts and Claude's responses.
+
+---
+
+## Prompt
+**Time**: 2026-06-16 08:10:07 | **Session**: 72788b16
+
+```
+package up the skill in /Users/tonytam/.claude/skills/gcloud-cost-control/ and copy it into this director
+```
+
+### Response
+
+The skill has 4 files. Let me copy everything over.
+
+---
+
+## Prompt
+**Time**: 2026-06-16 08:14:28 | **Session**: 72788b16
+
+```
+create a public github repo and push local changes
+```
+
