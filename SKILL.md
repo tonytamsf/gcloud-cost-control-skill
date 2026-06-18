@@ -219,7 +219,53 @@ gcloud billing budgets list --billing-account=<BILLING_ACCT_ID> --format=yaml
 gcloud billing budgets delete <OLD_BUDGET_ID> --billing-account=<BILLING_ACCT_ID>
 ```
 
-**Warning:** Disabling billing is a hard stop — ALL paid services shut down. The project must be manually re-linked to restore service. Always identify and fix the cost driver before re-enabling.
+**Warning:** Disabling billing is a hard stop — ALL paid services shut down (Cloud Functions return 503, APIs become unavailable). The project must be manually re-linked to restore service. Always identify and fix the cost driver before re-enabling.
+
+### 4i. Set up billing-disabled email alert
+
+When the enforcement function disables billing, it writes a CRITICAL-severity structured log to `billing-enforcement`. Set up a GCP Monitoring alert to email the billing admin immediately:
+
+```bash
+# 1. Create an email notification channel
+CHANNEL_ID=$(gcloud beta monitoring channels create \
+  --project=<PROJECT_ID> \
+  --display-name="Billing Admin (<ADMIN_NAME>)" \
+  --type=email \
+  --channel-labels=email_address=<ADMIN_EMAIL> \
+  --format='value(name)')
+
+# 2. Create a log-based alert policy
+cat > /tmp/billing-alert-policy.json << 'POLICY'
+{
+  "displayName": "Billing Disabled Alert",
+  "documentation": {
+    "content": "The onBudgetAlert function has disabled billing for project <PROJECT_ID> because costs exceeded the budget. All Cloud Functions are now offline.\n\nTo re-enable: gcloud billing projects link <PROJECT_ID> --billing-account=<BILLING_ACCT_ID>",
+    "mimeType": "text/markdown"
+  },
+  "conditions": [
+    {
+      "displayName": "Billing disabled log detected",
+      "conditionMatchedLog": {
+        "filter": "resource.type=\"cloud_function\" AND logName=\"projects/<PROJECT_ID>/logs/billing-enforcement\" AND severity=\"CRITICAL\" AND jsonPayload.action=\"billing_disabled\""
+      }
+    }
+  ],
+  "alertStrategy": {
+    "notificationRateLimit": { "period": "300s" }
+  },
+  "combiner": "OR",
+  "notificationChannels": ["CHANNEL_ID_HERE"]
+}
+POLICY
+
+# Replace the channel ID placeholder and create
+sed -i '' "s|CHANNEL_ID_HERE|${CHANNEL_ID}|" /tmp/billing-alert-policy.json
+gcloud alpha monitoring policies create \
+  --project=<PROJECT_ID> \
+  --policy-from-file=/tmp/billing-alert-policy.json
+```
+
+The enforcement function uses `@google-cloud/logging` to write the structured CRITICAL log entry with `action: "billing_disabled"`, `costAmount`, `budgetAmount`, and the re-enable command. This ensures the alert fires even though Cloud Functions go offline immediately after — the log is written before the function exits.
 
 ---
 
@@ -331,6 +377,56 @@ gcloud services enable billingbudgets.googleapis.com --project=<PROJECT_ID>
 
 ---
 
+## Step 7: API Key Security Audit
+
+Unrestricted API keys are a major cost risk — anyone who obtains the key can make unlimited API calls billed to your project. Always audit and restrict keys as part of cost control.
+
+### Check for unrestricted keys
+
+```bash
+gcloud services api-keys list --project=<PROJECT_ID> \
+  --format="table(name.basename(),displayName,restrictions)"
+```
+
+Any key without `restrictions` or with empty `apiTargets` is unrestricted and dangerous.
+
+### Restrict a key to specific APIs
+
+```bash
+# Restrict to a single API (e.g., Gemini)
+gcloud services api-keys update <KEY_ID> \
+  --project=<PROJECT_ID> \
+  --api-target=service=generativelanguage.googleapis.com
+
+# Restrict to multiple APIs
+gcloud services api-keys update <KEY_ID> \
+  --project=<PROJECT_ID> \
+  --api-target=service=generativelanguage.googleapis.com \
+  --api-target=service=texttospeech.googleapis.com
+```
+
+### Common keys to check
+
+| Key | Should be restricted to |
+|---|---|
+| Gemini API Key | `generativelanguage.googleapis.com` only |
+| Browser key (Firebase) | Firebase services only (usually auto-restricted) |
+| iOS/Android keys (Firebase) | Firebase services only (usually auto-restricted) |
+
+Unrestricted Gemini/TTS keys are especially dangerous because those APIs bill per-character/per-token with no built-in quotas. An attacker with the key can run up thousands of dollars in hours.
+
+### Set per-key quotas (optional additional protection)
+
+After restricting APIs, also consider setting per-minute or per-day quota limits on the API itself:
+
+```bash
+# Check current quotas
+gcloud services quotas list --service=generativelanguage.googleapis.com \
+  --project=<PROJECT_ID> --format="table(metricName,quotaLimit)"
+```
+
+---
+
 ## Prerequisite APIs
 
 These APIs must be enabled for full cost control functionality:
@@ -339,3 +435,4 @@ These APIs must be enabled for full cost control functionality:
 - `pubsub.googleapis.com` — for budget notification routing
 - `cloudbilling.googleapis.com` — for billing account management
 - `bigquery.googleapis.com` — for billing export queries
+- `apikeys.googleapis.com` — for API key management and restriction
